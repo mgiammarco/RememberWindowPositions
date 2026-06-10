@@ -1524,8 +1524,8 @@ Item {
         }
     }
 
-    function loadWindowsFromSettings() {
-        let savedWindows = JSON.parse(settings.rememberwindowpositions_windows);
+    function parseWindowsBlob(jsonString) {
+        let savedWindows = JSON.parse(jsonString);
         let convertedWindows = {};
 
         logE('Loading application windows from settings');
@@ -1595,7 +1595,11 @@ Item {
         }
 
         //log('Load - converted windows: ' + JSON.stringify(convertedWindows));
-        config.windows = convertedWindows;
+        return convertedWindows;
+    }
+
+    function loadWindowsFromSettings() {
+        config.windows = parseWindowsBlob(settings.rememberwindowpositions_windows);
     }
 
     function saveWindowsToSettings(shutdown) {
