@@ -1603,6 +1603,41 @@ Item {
         config.windows = parseWindowsBlob(settings.rememberwindowpositions_windows);
     }
 
+    function formatVersionTime(t) {
+        let date = new Date(t);
+        return date.getHours().toString().padStart(2, '0') + ':' + date.getMinutes().toString().padStart(2, '0');
+    }
+
+    function applyHistoryStep(direction) {
+        let history = getVersionHistory();
+        if (history.length === 0) {
+            onScreenDisplay.show('No saved versions yet', 'emblem-information');
+            return;
+        }
+
+        let newIndex = historyIndex + direction;
+        if (newIndex > history.length) {
+            onScreenDisplay.show('No older version', 'emblem-information');
+            return;
+        }
+        if (newIndex < 0) {
+            onScreenDisplay.show('No newer version', 'emblem-information');
+            return;
+        }
+
+        historyIndex = newIndex;
+        if (historyIndex === 0) {
+            if (applyVersion(settings.rememberwindowpositions_windows)) {
+                onScreenDisplay.show('Current layout restored', 'emblem-default');
+            }
+        } else {
+            let version = history[historyIndex - 1];
+            if (applyVersion(version.d)) {
+                onScreenDisplay.show('Window layout: version -' + historyIndex + '/' + history.length + ' (' + formatVersionTime(version.t) + ')', 'document-open-recent');
+            }
+        }
+    }
+
     function getVersionHistory() {
         if (!settings.rememberwindowpositions_windowsHistory) return [];
         try {
@@ -2043,6 +2078,20 @@ Item {
                     break;
             }
         }
+    }
+
+    ShortcutHandler {
+        name: "Remember Window Positions: Apply Previous Version"
+        text: "Remember Window Positions: Apply Previous Version"
+        sequence: "Meta+Ctrl+PgDown"
+        onActivated: applyHistoryStep(1)
+    }
+
+    ShortcutHandler {
+        name: "Remember Window Positions: Apply Next Version"
+        text: "Remember Window Positions: Apply Next Version"
+        sequence: "Meta+Ctrl+PgUp"
+        onActivated: applyHistoryStep(-1)
     }
 
     DBusCall {
