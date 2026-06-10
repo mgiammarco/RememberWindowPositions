@@ -23,6 +23,7 @@ Item {
     property var defaultConfig: ({})
 
     property int restoreMode: 0
+    property int historyIndex: 0
 
     function log(string) {
         if (!debugLogs) return;
@@ -1602,6 +1603,25 @@ Item {
         config.windows = parseWindowsBlob(settings.rememberwindowpositions_windows);
     }
 
+    function captureVersion(blob) {
+        if (blob === '{}') return; // don't record empty-state versions (e.g. after clearing all saves)
+        let history;
+        try {
+            history = JSON.parse(settings.rememberwindowpositions_windowsHistory);
+            if (!Array.isArray(history)) history = [];
+        } catch (e) {
+            logE('Version history corrupted, resetting: ' + e);
+            history = [];
+            settings.rememberwindowpositions_windowsHistory = '[]';
+        }
+        if (history.length > 0 && history[0].d === blob) return; // unchanged state - no new version
+        history.unshift({ t: Date.now(), d: blob });
+        if (history.length > 5) history.length = 5;
+        settings.rememberwindowpositions_windowsHistory = JSON.stringify(history);
+        historyIndex = 0;
+        log('Version history captured - versions stored: ' + history.length);
+    }
+
     function saveWindowsToSettings(shutdown) {
         if (config.onlySaveOnShutdown && !shutdown) return;
         clearSessionRestoreSaves();
@@ -1669,7 +1689,9 @@ Item {
 
         // log('Save - converted windows: ' + JSON.stringify(convertedWindows));
         log('Attempting to save windows...');
-        settings.rememberwindowpositions_windows = JSON.stringify(convertedWindows);
+        let blob = JSON.stringify(convertedWindows);
+        settings.rememberwindowpositions_windows = blob;
+        captureVersion(blob);
         log('Windows saved!');
     }
 
@@ -1845,6 +1867,7 @@ Item {
         // Saved in default settings file ~/.config/kde.org/kwin.conf
         id: settings
         property string rememberwindowpositions_windows: "{}"
+        property string rememberwindowpositions_windowsHistory: "[]"
         property string rememberwindowpositions_configOverrides: "{}"
         property int rememberwindowpositions_currentDefaultOverrideCount: 0
         // property bool rememberwindowpositions_autoShowMainMenu: true
