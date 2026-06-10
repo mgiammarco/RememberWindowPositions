@@ -307,7 +307,7 @@ Item {
             }
         }
 
-        log('getHighestCaptionScore highestScore: ' + highestScore + ' caption client: ' + client.caption + ' caption save: ' + windowData.saved[highestIndex].caption);
+        log('getHighestCaptionScore highestScore: ' + highestScore + ' caption client: ' + client.caption + ' caption save: ' + (highestIndex >= 0 ? windowData.saved[highestIndex].caption : '(none)'));
 
         return returnIndex ? [highestScore, highestIndex] : highestScore;
     }
@@ -339,7 +339,7 @@ Item {
             }
         }
 
-        log('getHighestCaptionScoreIgnoreNumbers highestScore: ' + highestScore + ' caption client: ' + client.caption + ' caption save: ' + windowData.saved[highestIndex].caption);
+        log('getHighestCaptionScoreIgnoreNumbers highestScore: ' + highestScore + ' caption client: ' + client.caption + ' caption save: ' + (highestIndex >= 0 ? windowData.saved[highestIndex].caption : '(none)'));
 
         return returnIndex ? [highestScore, highestIndex] : highestScore;
     }
@@ -1604,6 +1604,7 @@ Item {
     }
 
     function getVersionHistory() {
+        if (!settings.rememberwindowpositions_windowsHistory) return [];
         try {
             let history = JSON.parse(settings.rememberwindowpositions_windowsHistory);
             return Array.isArray(history) ? history : [];
@@ -1633,15 +1634,19 @@ Item {
             let windowData = versionWindows[client.resourceClass];
             if (!windowData || windowData.saved.length === 0) continue;
 
-            let match = config.ignoreNumbers
-                ? getHighestCaptionScoreIgnoreNumbers(windowData, client, true, true)
-                : getHighestCaptionScore(windowData, client, true, true);
-            let captionScore = match[0];
-            let savedIndex = match[1];
-            if (savedIndex < 0) continue;
+            try {
+                let match = config.ignoreNumbers
+                    ? getHighestCaptionScoreIgnoreNumbers(windowData, client, true, true)
+                    : getHighestCaptionScore(windowData, client, true, true);
+                let captionScore = match[0];
+                let savedIndex = match[1];
+                if (savedIndex < 0) continue;
 
-            windowData.saved[savedIndex].alreadyMatched = true;
-            restoreWindowPlacement(windowData.saved[savedIndex], client, captionScore, getCurrentConfig(client));
+                windowData.saved[savedIndex].alreadyMatched = true;
+                restoreWindowPlacement(windowData.saved[savedIndex], client, captionScore, getCurrentConfig(client));
+            } catch (e) {
+                logE('Could not apply version to window ' + client.resourceClass + ': ' + e);
+            }
         }
         return true;
     }
