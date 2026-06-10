@@ -1603,6 +1603,49 @@ Item {
         config.windows = parseWindowsBlob(settings.rememberwindowpositions_windows);
     }
 
+    function getVersionHistory() {
+        try {
+            let history = JSON.parse(settings.rememberwindowpositions_windowsHistory);
+            return Array.isArray(history) ? history : [];
+        } catch (e) {
+            logE('Version history corrupted, resetting: ' + e);
+            settings.rememberwindowpositions_windowsHistory = "[]";
+            onScreenDisplay.show('Version history corrupted, resetting', 'data-error');
+            return [];
+        }
+    }
+
+    function applyVersion(blob) {
+        let versionWindows;
+        try {
+            versionWindows = parseWindowsBlob(blob);
+        } catch (e) {
+            logE('Could not parse version data: ' + e);
+            onScreenDisplay.show('Could not apply version', 'data-error');
+            return false;
+        }
+
+        const clients = Workspace.stackingOrder;
+        for (let i = 0; i < clients.length; i++) {
+            let client = clients[i];
+            if (!isValidWindow(client)) continue;
+
+            let windowData = versionWindows[client.resourceClass];
+            if (!windowData || windowData.saved.length === 0) continue;
+
+            let match = config.ignoreNumbers
+                ? getHighestCaptionScoreIgnoreNumbers(windowData, client, true, true)
+                : getHighestCaptionScore(windowData, client, true, true);
+            let captionScore = match[0];
+            let savedIndex = match[1];
+            if (savedIndex < 0) continue;
+
+            windowData.saved[savedIndex].alreadyMatched = true;
+            restoreWindowPlacement(windowData.saved[savedIndex], client, captionScore, getCurrentConfig(client));
+        }
+        return true;
+    }
+
     function captureVersion(blob) {
         if (blob === '{}') return; // don't record empty-state versions (e.g. after clearing all saves)
         let history;
