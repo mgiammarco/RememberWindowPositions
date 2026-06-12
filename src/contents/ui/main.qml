@@ -395,6 +395,12 @@ Item {
         if (client.rwp_restoreBlocked) return;
         if (captionScore < config.minimumCaptionMatch) return;
         if (!config.restoreWindowsWithoutCaption && (!client.caption || client.caption.trim().length == 0)) return;
+
+        // Bind this saved entry to the live window's session-stable internalId. A later
+        // version-recall (applyVersion) then matches saved<->window exactly, so multiple
+        // windows of the same app are never shuffled into each other's positions.
+        saveData.internalId = client.internalId;
+
         let positionRestored = false;
         let sizeRestored = false;
         let virtualDesktopRestored = false;
@@ -1580,10 +1586,10 @@ Item {
                         top          : save.t.t,      // top
                         bottom       : save.t.b       // bottom
                     } : undefined,
-                    mouseTilerAuto   : save.o         // mouseTilerAuto
+                    mouseTilerAuto   : save.o,        // mouseTilerAuto
+                    internalId       : save.i         // internalId (session-stable, used for exact version-recall match)
                     // --- Omitted fields ---
                     // closeTime     :                // closeTime
-                    // internalId    : save.i         // internalId
                 });
                 if (save.p) {
                     log('Window ' + i + ' - x: ' + save.p.x + ' y: ' + save.p.y + ' width: ' + save.w + ' height: ' + save.h + ' minimized: ' + (save.m == 1) + ' stackingNumber: ' + save.s + ' desktopNumber: ' + save.d + ' serialNumber: ' + save.p.s + ' name: ' + save.p.n + ' sessionRestore: ' + (save.z == 1));
@@ -1662,12 +1668,50 @@ Item {
         }
 
         const clients = Workspace.stackingOrder;
+
+        // Collect valid candidates with the saved data for their application
+        let candidates = [];
         for (let i = 0; i < clients.length; i++) {
             let client = clients[i];
             if (!isValidWindow(client)) continue;
 
             let windowData = versionWindows[client.resourceClass];
             if (!windowData || windowData.saved.length === 0) continue;
+
+            candidates.push({ client: client, windowData: windowData, matched: false });
+        }
+
+        // Pass 1: exact match on the session-stable internalId. This is unambiguous
+        // even when several windows of the same app share overlapping captions, so it
+        // cannot shuffle windows into each other's positions.
+        for (let c = 0; c < candidates.length; c++) {
+            let client = candidates[c].client;
+            let windowData = candidates[c].windowData;
+            let clientId = client.internalId ? client.internalId.toString() : '';
+            if (!clientId) continue;
+
+            for (let s = 0; s < windowData.saved.length; s++) {
+                let save = windowData.saved[s];
+                if (save.alreadyMatched || !save.internalId) continue;
+                if (save.internalId === clientId) {
+                    try {
+                        save.alreadyMatched = true;
+                        candidates[c].matched = true;
+                        restoreWindowPlacement(save, client, 100, getCurrentConfig(client));
+                    } catch (e) {
+                        logE('Could not apply version (id match) to window ' + client.resourceClass + ': ' + e);
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Pass 2: caption-score fallback for windows with no id match - e.g. versions
+        // saved before internalId existed, or windows reopened with a fresh id.
+        for (let c = 0; c < candidates.length; c++) {
+            if (candidates[c].matched) continue;
+            let client = candidates[c].client;
+            let windowData = candidates[c].windowData;
 
             try {
                 let match = config.ignoreNumbers
@@ -1760,10 +1804,10 @@ Item {
                             t: save.tile.top,              // top
                             b: save.tile.bottom            // bottom
                         } : undefined,
-                        o: save.mouseTilerAuto             // mouseTilerAuto
+                        o: save.mouseTilerAuto,            // mouseTilerAuto
+                        i: save.internalId ? save.internalId.toString() : undefined // internalId (session-stable, used for exact version-recall match)
                         // --- Omitted fields ---
                         //  : save.closeTime               // closeTime
-                        // i: save.internalId              // internalId
                         //  : save.alreadyMatched          // alreadyMatched
                     });
                 }
