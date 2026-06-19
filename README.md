@@ -83,6 +83,10 @@ Can operate in one of four modes where it remembers:
 
 There are lots of other settings that let you control exactly how and when to restore windows to their previous state.
 
+### <p id="version-history"></p>Window layout version history
+
+- Keeps a history of the last 5 saved window layouts; step back/forward through them with `Meta+Ctrl+PgDown` / `Meta+Ctrl+PgUp` to instantly reapply a previous layout to the open windows.
+
 ### Future ideas
 
 The future features depend on you.
@@ -179,6 +183,13 @@ It is possible to configure individual application and windows by pressing the C
 If this keyboard shortcut does not work for you, make sure it is correctly setup in `System Settings` > `Keyboard` > `Shortcuts` > `Window Management` > `Remember Window Positions: Show Config`<br>
 
 ![](./assets/shortcut_1.png)<br>
+
+Two additional shortcuts let you step through the history of saved window layouts:
+
+- **Remember Window Positions: Apply Previous Version** (`Meta+Ctrl+PgDown` by default) - reapplies the previous saved layout version to the currently open windows. Press repeatedly to go further back (up to 5 versions).
+- **Remember Window Positions: Apply Next Version** (`Meta+Ctrl+PgUp` by default) - steps forward again toward the most recent saved layout.
+
+An on-screen message confirms which version was applied (e.g. "Window layout: version -1/3 (14:32)"), or reports "No older version" / "No newer version" when the end of the history is reached, or "No saved versions yet" if no layout history has been captured yet. If pressing these shortcuts shows no on-screen message, the default key combination may conflict with another global shortcut — reassign it in `System Settings` > `Keyboard` > `Shortcuts` > `Window Management`.
 
 ## <p id="system-settings"></p>Changing system settings
 

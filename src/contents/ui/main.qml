@@ -23,6 +23,21 @@ Item {
     property var defaultConfig: ({})
 
     property int restoreMode: 0
+    property int historyIndex: 0
+    // True while the user is stepping through version history with the shortcuts.
+    // While set, the periodic snapshot must NOT overwrite the persisted layout or
+    // capture versions - otherwise browsing to version N-1 lets the 60s snapshot
+    // re-persist that browsed layout as the live one, so stepping back to "current"
+    // (index 0) no longer restores the layout you started from.
+    property bool navigatingHistory: false
+    // Frozen copy of the live layout, taken the moment history navigation begins.
+    // Index 0 ("Current layout") restores THIS, not the volatile persisted blob,
+    // so going N -> N-1 -> N is idempotent regardless of background snapshots.
+    property string liveBaselineBlob: ""
+    // Timestamp (ms) of the last screen-configuration change. Version capture is
+    // paused for a grace period afterwards so a monitor connect/disconnect (which
+    // makes KWin reshuffle windows) cannot evict the last good layout from history.
+    property double lastScreenChangeTime: 0
 
     function log(string) {
         if (!debugLogs) return;
@@ -306,7 +321,7 @@ Item {
             }
         }
 
-        log('getHighestCaptionScore highestScore: ' + highestScore + ' caption client: ' + client.caption + ' caption save: ' + windowData.saved[highestIndex].caption);
+        log('getHighestCaptionScore highestScore: ' + highestScore + ' caption client: ' + client.caption + ' caption save: ' + (highestIndex >= 0 ? windowData.saved[highestIndex].caption : '(none)'));
 
         return returnIndex ? [highestScore, highestIndex] : highestScore;
     }
@@ -338,7 +353,7 @@ Item {
             }
         }
 
-        log('getHighestCaptionScoreIgnoreNumbers highestScore: ' + highestScore + ' caption client: ' + client.caption + ' caption save: ' + windowData.saved[highestIndex].caption);
+        log('getHighestCaptionScoreIgnoreNumbers highestScore: ' + highestScore + ' caption client: ' + client.caption + ' caption save: ' + (highestIndex >= 0 ? windowData.saved[highestIndex].caption : '(none)'));
 
         return returnIndex ? [highestScore, highestIndex] : highestScore;
     }
@@ -394,6 +409,12 @@ Item {
         if (client.rwp_restoreBlocked) return;
         if (captionScore < config.minimumCaptionMatch) return;
         if (!config.restoreWindowsWithoutCaption && (!client.caption || client.caption.trim().length == 0)) return;
+
+        // Bind this saved entry to the live window's session-stable internalId. A later
+        // version-recall (applyVersion) then matches saved<->window exactly, so multiple
+        // windows of the same app are never shuffled into each other's positions.
+        saveData.internalId = client.internalId;
+
         let positionRestored = false;
         let sizeRestored = false;
         let virtualDesktopRestored = false;
@@ -1451,6 +1472,11 @@ Item {
         }
     }
 
+    function markScreensChanged() {
+        lastScreenChangeTime = Date.now();
+        log('Screen configuration changed - pausing version capture for grace period');
+    }
+
     function onActivateWindow(client) {
         if (client && identifyWindow) {
             windowIdentified(client);
@@ -1524,8 +1550,68 @@ Item {
         }
     }
 
-    function loadWindowsFromSettings() {
-        let savedWindows = JSON.parse(settings.rememberwindowpositions_windows);
+    Timer {
+        // Periodic crash-resilience snapshot of currently-open windows. Without this,
+        // a hard system crash (which fires no window-close events) loses every open
+        // window, because geometry is otherwise only persisted on close.
+        id: snapshotTimer
+        interval: 60000 // 60s
+        repeat: true
+        running: true
+        onTriggered: saveOpenWindowsSnapshot()
+    }
+
+    Timer {
+        // Idle-commit for history browsing. Re-armed on every version-nav keypress.
+        // If the user steps to an older version and then stops (no further keypress),
+        // this fires and adopts the parked layout as the new live one: navigation
+        // mode ends and the periodic snapshot resumes, persisting/capturing from
+        // wherever they settled. If they were back at index 0 it simply tidies up.
+        id: navIdleTimer
+        interval: 120000 // 2 min
+        repeat: false
+        onTriggered: {
+            if (navigatingHistory && historyIndex !== 0) {
+                log('History navigation idle - adopting parked layout as live');
+                navigatingHistory = false;
+                liveBaselineBlob = "";
+                historyIndex = 0;
+            } else {
+                endHistoryNavigation();
+            }
+        }
+    }
+
+    Timer {
+        // Trailing-debounce for version-history capture. Each save (re)starts the
+        // timer; the version is only recorded once saves go quiet, so a rapid
+        // close-cascade yields a single version instead of several near-identical
+        // transient snapshots that evict useful older layouts.
+        id: versionCaptureTimer
+        property string pendingBlob: ""
+        interval: 8000 // 8s quiet period
+        repeat: false
+        onTriggered: {
+            if (pendingBlob.length > 0) {
+                captureVersion(pendingBlob);
+                pendingBlob = "";
+            }
+        }
+
+        function schedule(blob, immediate) {
+            pendingBlob = blob;
+            if (immediate) {
+                versionCaptureTimer.stop();
+                captureVersion(blob);
+                pendingBlob = "";
+            } else {
+                versionCaptureTimer.restart();
+            }
+        }
+    }
+
+    function parseWindowsBlob(jsonString) {
+        let savedWindows = JSON.parse(jsonString);
         let convertedWindows = {};
 
         logE('Loading application windows from settings');
@@ -1579,10 +1665,10 @@ Item {
                         top          : save.t.t,      // top
                         bottom       : save.t.b       // bottom
                     } : undefined,
-                    mouseTilerAuto   : save.o         // mouseTilerAuto
+                    mouseTilerAuto   : save.o,        // mouseTilerAuto
+                    internalId       : save.i         // internalId (session-stable, used for exact version-recall match)
                     // --- Omitted fields ---
                     // closeTime     :                // closeTime
-                    // internalId    : save.i         // internalId
                 });
                 if (save.p) {
                     log('Window ' + i + ' - x: ' + save.p.x + ' y: ' + save.p.y + ' width: ' + save.w + ' height: ' + save.h + ' minimized: ' + (save.m == 1) + ' stackingNumber: ' + save.s + ' desktopNumber: ' + save.d + ' serialNumber: ' + save.p.s + ' name: ' + save.p.n + ' sessionRestore: ' + (save.z == 1));
@@ -1595,7 +1681,419 @@ Item {
         }
 
         //log('Load - converted windows: ' + JSON.stringify(convertedWindows));
-        config.windows = convertedWindows;
+        return convertedWindows;
+    }
+
+    function loadWindowsFromSettings() {
+        // Guard against a corrupt/truncated blob (e.g. after a crash): an unguarded
+        // JSON.parse here would throw straight out of Component.onCompleted and abort
+        // the whole script init. Fall back to the last-good backup, then to empty.
+        try {
+            config.windows = parseWindowsBlob(settings.rememberwindowpositions_windows);
+            return;
+        } catch (e) {
+            logE('Saved windows blob unreadable, trying backup: ' + e);
+        }
+        try {
+            config.windows = parseWindowsBlob(settings.rememberwindowpositions_windowsBackup);
+            logE('Recovered window layout from backup');
+        } catch (e2) {
+            logE('Backup blob also unreadable, starting with empty layout: ' + e2);
+            config.windows = {};
+        }
+    }
+
+    function formatVersionTime(t) {
+        let date = new Date(t);
+        return date.getHours().toString().padStart(2, '0') + ':' + date.getMinutes().toString().padStart(2, '0');
+    }
+
+    function applyHistoryStep(direction) {
+        let history = getVersionHistory();
+        if (history.length === 0) {
+            onScreenDisplay.show('No saved versions yet', 'emblem-information');
+            return;
+        }
+
+        let newIndex = historyIndex + direction;
+        if (newIndex > history.length) {
+            onScreenDisplay.show('No older version', 'emblem-information');
+            return;
+        }
+        if (newIndex < 0) {
+            onScreenDisplay.show('No newer version', 'emblem-information');
+            return;
+        }
+
+        // First step away from "current": freeze the live layout so that returning
+        // to index 0 restores exactly what was on screen before browsing began, and
+        // enter navigation mode so the periodic snapshot stops clobbering it.
+        if (!navigatingHistory) {
+            let live = buildOpenWindowsBlob();
+            liveBaselineBlob = live ? live : settings.rememberwindowpositions_windows;
+            navigatingHistory = true;
+        }
+
+        historyIndex = newIndex;
+        // Each keypress re-arms the idle timer; if the user settles on an old
+        // version and stops, navIdleTimer commits it as the new live layout.
+        navIdleTimer.restart();
+
+        if (historyIndex === 0) {
+            if (applyVersion(liveBaselineBlob)) {
+                onScreenDisplay.show('Current layout restored', 'emblem-default');
+            }
+            endHistoryNavigation();
+        } else {
+            let version = history[historyIndex - 1];
+            if (applyVersion(version.d)) {
+                onScreenDisplay.show('Window layout: version -' + historyIndex + '/' + history.length + ' (' + formatVersionTime(version.t) + ')', 'document-open-recent');
+            }
+        }
+    }
+
+    // Leave history-navigation mode and resume normal snapshot/capture. Called when
+    // the user steps back to index 0 (current). Does NOT adopt a browsed layout -
+    // that is what navIdleTimer does after the user settles on an old version.
+    function endHistoryNavigation() {
+        navigatingHistory = false;
+        historyIndex = 0;
+        liveBaselineBlob = "";
+        navIdleTimer.stop();
+    }
+
+    function getVersionHistory() {
+        if (!settings.rememberwindowpositions_windowsHistory) return [];
+        try {
+            let history = JSON.parse(settings.rememberwindowpositions_windowsHistory);
+            return Array.isArray(history) ? history : [];
+        } catch (e) {
+            logE('Version history corrupted, resetting: ' + e);
+            settings.rememberwindowpositions_windowsHistory = "[]";
+            onScreenDisplay.show('Version history corrupted, resetting', 'data-error');
+            return [];
+        }
+    }
+
+    function applyVersion(blob) {
+        let versionWindows;
+        try {
+            versionWindows = parseWindowsBlob(blob);
+        } catch (e) {
+            logE('Could not parse version data: ' + e);
+            onScreenDisplay.show('Could not apply version', 'data-error');
+            return false;
+        }
+
+        const clients = Workspace.stackingOrder;
+
+        // Group the valid live windows by application. Matching is done per-app so a
+        // window can only ever be assigned a saved record from its own resourceClass.
+        let liveByApp = {};
+        for (let i = 0; i < clients.length; i++) {
+            let client = clients[i];
+            if (!isValidWindow(client)) continue;
+            let windowData = versionWindows[client.resourceClass];
+            if (!windowData || windowData.saved.length === 0) continue;
+            if (!liveByApp[client.resourceClass]) liveByApp[client.resourceClass] = [];
+            liveByApp[client.resourceClass].push(client);
+        }
+
+        for (let app in liveByApp) {
+            let windowData = versionWindows[app];
+            let liveClients = liveByApp[app];
+
+            // Pass 1: exact match on the session-stable internalId. Unambiguous even
+            // when several windows of the same app share overlapping captions, so it
+            // cannot shuffle windows into each other's positions. Only matches within
+            // the same KWin session (ids are regenerated on relogin).
+            let remaining = [];
+            for (let c = 0; c < liveClients.length; c++) {
+                let client = liveClients[c];
+                let clientId = client.internalId ? client.internalId.toString() : '';
+                let matched = false;
+                if (clientId) {
+                    for (let s = 0; s < windowData.saved.length; s++) {
+                        let save = windowData.saved[s];
+                        if (save.alreadyMatched || !save.internalId) continue;
+                        if (save.internalId === clientId) {
+                            try {
+                                save.alreadyMatched = true;
+                                restoreWindowPlacement(save, client, 100, getCurrentConfig(client));
+                                matched = true;
+                            } catch (e) {
+                                logE('Could not apply version (id match) to window ' + client.resourceClass + ': ' + e);
+                                matched = true; // consumed this save regardless
+                            }
+                            break;
+                        }
+                    }
+                }
+                if (!matched) remaining.push(client);
+            }
+
+            // Pass 2: bidirectional confidence match for the windows with no id match
+            // (versions saved before internalId existed, or windows reopened with a
+            // fresh id). This reuses the SAME twoWayMatch + confidence ladder as the
+            // normal restore path - a greedy per-window caption match misallocates
+            // windows whose captions are similar. The parsed version object is already
+            // a valid windowData (its .saved carry alreadyMatched=true for id-matched
+            // entries, which twoWayMatch skips); we just feed it the remaining windows
+            // as the loading list. minConfidence 0 = always place the best match.
+            if (remaining.length > 0) {
+                windowData.loading = remaining;
+                let confidenceIndex = 0;
+                let results = [];
+                while (windowData.loading.length > 0 && confidenceIndex < config.confidence.length) {
+                    results.push(...twoWayMatch(windowData, config.confidence[confidenceIndex], 0));
+                    confidenceIndex++;
+                }
+                results.sort((a, b) => a.saved.stackingOrder - b.saved.stackingOrder);
+                for (let r = 0; r < results.length; r++) {
+                    try {
+                        restoreWindowPlacement(results[r].saved, results[r].loading, results[r].captionScore, getCurrentConfig(results[r].loading));
+                    } catch (e) {
+                        logE('Could not apply version to window ' + app + ': ' + e);
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    // Normalized fingerprint of a layout blob, used for version dedup. Keeps the
+    // visually-meaningful fields (caption, geometry, screen, desktop, minimized)
+    // and drops volatile ones (window stacking order, internalId, mouseTilerAuto,
+    // app lastAccessTime), plus sorts apps and windows so ordering differences
+    // between the close-path and snapshot serializers do not look like a change.
+    function versionSignature(blob) {
+        let parsed;
+        try {
+            parsed = JSON.parse(blob);
+        } catch (e) {
+            return blob; // unparseable - fall back to raw compare
+        }
+        let apps = Object.keys(parsed).sort();
+        let out = [];
+        for (let ai = 0; ai < apps.length; ai++) {
+            let app = apps[ai];
+            let saved = parsed[app].s || [];
+            let wins = [];
+            for (let wi = 0; wi < saved.length; wi++) {
+                let w = saved[wi];
+                // Round geometry so sub-pixel restore jitter does not read as a
+                // different layout (a recalled version is otherwise re-captured).
+                wins.push([w.c, Math.round(w.x), Math.round(w.y), Math.round(w.w), Math.round(w.h), w.m, w.d,
+                           w.p ? [w.p.s, Math.round(w.p.x), Math.round(w.p.y)] : null]);
+            }
+            wins.sort((a, b) => JSON.stringify(a) < JSON.stringify(b) ? -1 : 1);
+            out.push([app, wins]);
+        }
+        return JSON.stringify(out);
+    }
+
+    function captureVersion(blob) {
+        if (blob === '{}') return; // don't record empty-state versions (e.g. after clearing all saves)
+        let history;
+        try {
+            history = JSON.parse(settings.rememberwindowpositions_windowsHistory);
+            if (!Array.isArray(history)) history = [];
+        } catch (e) {
+            logE('Version history corrupted, resetting: ' + e);
+            history = [];
+            settings.rememberwindowpositions_windowsHistory = '[]';
+        }
+        // Skip if an equivalent layout is already stored in any slot, not just the
+        // head. Comparison uses a normalized signature that ignores volatile fields
+        // (stacking order, internalId, mouse-tiler state, timestamps) and ordering,
+        // so re-saving a layout whose only change is z-order or fresh session ids
+        // does not create a duplicate-looking version.
+        let sig = versionSignature(blob);
+        for (let i = 0; i < history.length; i++) {
+            if (versionSignature(history[i].d) === sig) return;
+        }
+        history.unshift({ t: Date.now(), d: blob });
+        if (history.length > 5) history.length = 5;
+        settings.rememberwindowpositions_windowsHistory = JSON.stringify(history);
+        // Don't yank the user's browse position to "current" if a window happens to
+        // close while they are stepping through history - that would shift every
+        // index under them. Their position is reconciled when navigation ends.
+        if (!navigatingHistory) historyIndex = 0;
+        log('Version history captured - versions stored: ' + history.length);
+    }
+
+    // Compact a rich save record into the short-keyed form persisted in settings.
+    // Shared by saveWindowsToSettings (close path) and saveOpenWindowsSnapshot (live path)
+    // so the two serializers cannot drift apart.
+    function compactSaveRecord(save) {
+        return {
+            c: save.caption,                   // caption
+            x: save.x,                         // x
+            y: save.y,                         // y
+            w: save.width,                     // width
+            h: save.height,                    // height
+            m: save.minimized ? 1 : 0,         // minimized
+            k: save.keepAbove ? 1 : 0,         // keepAbove
+            b: save.keepBelow ? 1 : 0,         // keepBelow
+            s: save.stackingOrder,             // stackingOrder
+            d: save.desktopNumber,             // desktopNumber
+            a: save.activities,                // activities
+            r: save.rememberAlways ? 1 : 0,    // rememberAlways
+            n: save.singleWindow ? 1 : 0,      // singleWindow
+            p: save.position ? {               // position
+                x: save.position.x,            // x
+                y: save.position.y,            // y
+                s: save.position.serialNumber, // serialNumber
+                n: save.position.name          // name
+            } : undefined,
+            z: save.sessionRestore ? 1 : 0,    // sessionRestore
+            t: save.tile ? {                   // tile
+                q: save.tile.quick ? 1 : 0,    // quick
+                x: save.tile.x,                // x
+                y: save.tile.y,                // y
+                w: save.tile.width,            // width
+                h: save.tile.height,           // height
+                l: save.tile.left,             // left
+                r: save.tile.right,            // right
+                t: save.tile.top,              // top
+                b: save.tile.bottom            // bottom
+            } : undefined,
+            o: save.mouseTilerAuto,            // mouseTilerAuto
+            i: save.internalId ? save.internalId.toString() : undefined // internalId
+        };
+    }
+
+    // Build a rich save record from a currently-open live window (mirrors the
+    // currentWindowData built in removeWindow, minus close-only bookkeeping fields).
+    function liveSaveRecordFromClient(client) {
+        let convertedPosition = client.output.mapFromGlobal(client.pos);
+        return {
+            internalId     : client.internalId,
+            caption        : client.caption.toString(),
+            x              : client.x,
+            y              : client.y,
+            width          : client.width,
+            height         : client.height,
+            minimized      : client.minimized,
+            keepAbove      : client.keepAbove,
+            keepBelow      : client.keepBelow,
+            stackingOrder  : client.stackingOrder,
+            desktopNumber  : client.onAllDesktops ? -1 : client.desktops[0].x11DesktopNumber,
+            activities     : [...client.activities],
+            rememberAlways : false,
+            singleWindow   : false,
+            position       : {
+                x: convertedPosition.x,
+                y: convertedPosition.y,
+                serialNumber: client.output.serialNumber,
+                name: client.output.name
+            },
+            sessionRestore : false,
+            tile           : convertTileData(client),
+            mouseTilerAuto : (client.mt_autoRestore ? client.mt_autoRestore : 0)
+        };
+    }
+
+    // Serialize the current live layout (all open windows merged with the on-close
+    // memory of closed apps) into the persisted blob form, WITHOUT persisting it.
+    // Returns '' when there is nothing to record. Shared by saveOpenWindowsSnapshot
+    // (which then persists) and applyHistoryStep (which freezes it as the index-0
+    // baseline before browsing).
+    function buildOpenWindowsBlob() {
+        let convertedWindows = {};
+        let liveIds = {};                            // resourceClass -> { internalId: true }
+
+        const clients = Workspace.stackingOrder;
+        for (let i = 0; i < clients.length; i++) {
+            let client = clients[i];
+            try {
+                if (!isValidWindow(client)) continue;
+                let currentConfig = getCurrentConfig(client);
+                if (currentConfig.blocked || currentConfig.rememberNever) continue;
+
+                let key = client.resourceClass;
+                if (!convertedWindows[key]) {
+                    convertedWindows[key] = { s: [], l: Date.now(), w: 0 };
+                    liveIds[key] = {};
+                }
+                convertedWindows[key].s.push(compactSaveRecord(liveSaveRecordFromClient(client)));
+                convertedWindows[key].w++;
+                liveIds[key][client.internalId.toString()] = true;
+            } catch (e) {
+                logE('Snapshot skipped a window: ' + e);
+            }
+        }
+
+        // Preserve on-close memory for apps that are NOT currently open, and the
+        // rememberAlways saves of apps that are only partly open.
+        for (let key in config.windows) {
+            let windowData = config.windows[key];
+            if (windowData.saved.length === 0) continue;
+
+            if (!convertedWindows[key]) {
+                // App fully closed - carry its saved memory through unchanged
+                convertedWindows[key] = { s: [], l: windowData.lastAccessTime, w: windowData.windowCountLastSession };
+                for (let j = 0; j < windowData.saved.length; j++) {
+                    convertedWindows[key].s.push(compactSaveRecord(windowData.saved[j]));
+                }
+            } else {
+                // App partly live - keep rememberAlways saves that are not already captured live
+                for (let j = 0; j < windowData.saved.length; j++) {
+                    let sv = windowData.saved[j];
+                    if (!sv.rememberAlways) continue;
+                    let id = sv.internalId ? sv.internalId.toString() : null;
+                    if (id && liveIds[key] && liveIds[key][id]) continue;
+                    convertedWindows[key].s.push(compactSaveRecord(sv));
+                }
+            }
+        }
+
+        if (Object.keys(convertedWindows).length === 0) return '';
+
+        return JSON.stringify(convertedWindows);
+    }
+
+    // Periodic crash-resilience snapshot. The close-event model never persists
+    // windows that are still open, so a hard crash (no close events fire) loses
+    // every open window. This persists the live geometry of all currently-open
+    // windows, merged with the on-close memory of apps that are not currently open.
+    function saveOpenWindowsSnapshot() {
+        if (config.onlySaveOnShutdown) return;       // user opted into shutdown-only saves
+        if (config.loginOverride) return;            // skip while login restore is still settling (avoids persisting half-restored geometry)
+        // While the user is browsing version history, the windows on screen are a
+        // recalled past layout, not the live one. Persisting/capturing it here would
+        // overwrite the frozen baseline and shuffle the history indices, breaking the
+        // N -> N-1 -> N round-trip. navIdleTimer resumes capture once they settle.
+        if (navigatingHistory) {
+            log('Skipping snapshot - history navigation in progress');
+            return;
+        }
+
+        let blob = buildOpenWindowsBlob();
+        if (!blob) return;
+
+        // Persist the live layout for crash recovery (only when it actually changed).
+        if (blob !== settings.rememberwindowpositions_windows) {
+            let previous = settings.rememberwindowpositions_windows;
+            if (previous && previous !== '{}' && previous !== blob) {
+                settings.rememberwindowpositions_windowsBackup = previous;
+            }
+            settings.rememberwindowpositions_windows = blob;
+            log('Open-window snapshot saved');
+        }
+
+        // Record an id-tagged version so a same-session scramble (e.g. monitor
+        // sleep/resume) can be undone exactly via internalId match on recall.
+        // Skip while the screen config is still settling - right after a monitor
+        // change KWin has reshuffled the windows, and capturing that scrambled
+        // state would evict the last good layout. captureVersion dedups, so a
+        // stable layout is not recorded again on every tick.
+        const screenStableGraceMs = 2 * 60 * 1000;
+        if (Date.now() - lastScreenChangeTime > screenStableGraceMs) {
+            captureVersion(blob);
+        } else {
+            log('Skipping version capture - screen config changed recently');
+        }
     }
 
     function saveWindowsToSettings(shutdown) {
@@ -1620,52 +2118,26 @@ Item {
                     // e: window.closed               // closed
                 };
                 for (let i = 0; i < window.saved.length; i++) {
-                    let save = window.saved[i];
-                    convertedWindows[key].s.push({
-                        c: save.caption,                   // caption
-                        x: save.x,                         // x
-                        y: save.y,                         // y
-                        w: save.width,                     // width
-                        h: save.height,                    // height
-                        m: save.minimized ? 1 : 0,         // minimized
-                        k: save.keepAbove ? 1 : 0,         // keepAbove
-                        b: save.keepBelow ? 1 : 0,         // keepBelow
-                        s: save.stackingOrder,             // stackingOrder
-                        d: save.desktopNumber,             // desktopNumber
-                        a: save.activities,                // activities
-                        r: save.rememberAlways ? 1 : 0,    // rememberAlways
-                        n: save.singleWindow ? 1 : 0,      // singleWindow
-                        p: save.position ? {               // position
-                            x: save.position.x,            // x
-                            y: save.position.y,            // y
-                            s: save.position.serialNumber, // serialNumber
-                            n: save.position.name          // name
-                        } : undefined,
-                        z: save.sessionRestore ? 1 : 0,    // sessionRestore
-                        t: save.tile ? {                   // tile
-                            q: save.tile.quick ? 1 : 0,    // quick
-                            x: save.tile.x,                // x
-                            y: save.tile.y,                // y
-                            w: save.tile.width,            // width
-                            h: save.tile.height,           // height
-                            l: save.tile.left,             // left
-                            r: save.tile.right,            // right
-                            t: save.tile.top,              // top
-                            b: save.tile.bottom            // bottom
-                        } : undefined,
-                        o: save.mouseTilerAuto             // mouseTilerAuto
-                        // --- Omitted fields ---
-                        //  : save.closeTime               // closeTime
-                        // i: save.internalId              // internalId
-                        //  : save.alreadyMatched          // alreadyMatched
-                    });
+                    // closeTime and alreadyMatched are intentionally not persisted
+                    convertedWindows[key].s.push(compactSaveRecord(window.saved[i]));
                 }
             }
         }
 
         // log('Save - converted windows: ' + JSON.stringify(convertedWindows));
         log('Attempting to save windows...');
-        settings.rememberwindowpositions_windows = JSON.stringify(convertedWindows);
+        let blob = JSON.stringify(convertedWindows);
+        // Keep a one-deep backup of the previously persisted layout so a corrupt
+        // write can be recovered by loadWindowsFromSettings on the next start.
+        let previous = settings.rememberwindowpositions_windows;
+        if (previous && previous !== '{}' && previous !== blob) {
+            settings.rememberwindowpositions_windowsBackup = previous;
+        }
+        settings.rememberwindowpositions_windows = blob;
+        // Debounce the history capture: a burst of saves (crash/logout close-cascade)
+        // collapses into one version instead of flooding the 5-deep history. On
+        // shutdown there is no time to wait for the timer, so capture immediately.
+        versionCaptureTimer.schedule(blob, shutdown);
         log('Windows saved!');
     }
 
@@ -1841,6 +2313,8 @@ Item {
         // Saved in default settings file ~/.config/kde.org/kwin.conf
         id: settings
         property string rememberwindowpositions_windows: "{}"
+        property string rememberwindowpositions_windowsBackup: "{}"
+        property string rememberwindowpositions_windowsHistory: "[]"
         property string rememberwindowpositions_configOverrides: "{}"
         property int rememberwindowpositions_currentDefaultOverrideCount: 0
         // property bool rememberwindowpositions_autoShowMainMenu: true
@@ -1872,6 +2346,15 @@ Item {
         loadOverridesFromSettings();
         loadWindowsFromSettings();
         addDefaultOverrides();
+
+        // Pause version capture briefly after any screen-config change so a monitor
+        // connect/disconnect cannot evict the last good layout from history before
+        // it can be recalled. Connect defensively - signal names vary across KWin
+        // versions, and a missing one must not abort init.
+        try { Workspace.screensChanged.connect(markScreensChanged); } catch (e) { log('No screensChanged signal: ' + e); }
+        try { Workspace.outputAdded.connect(markScreensChanged); } catch (e) {}
+        try { Workspace.outputRemoved.connect(markScreensChanged); } catch (e) {}
+        try { Workspace.virtualScreenGeometryChanged.connect(markScreensChanged); } catch (e) {}
 
         sessionStartedTimer.setTimeout(2 * 60 * 1000); // 2 minute session start countdown
 
@@ -1968,6 +2451,20 @@ Item {
                     break;
             }
         }
+    }
+
+    ShortcutHandler {
+        name: "Remember Window Positions: Apply Previous Version"
+        text: "Remember Window Positions: Apply Previous Version"
+        sequence: "Meta+Ctrl+PgDown"
+        onActivated: applyHistoryStep(1)
+    }
+
+    ShortcutHandler {
+        name: "Remember Window Positions: Apply Next Version"
+        text: "Remember Window Positions: Apply Next Version"
+        sequence: "Meta+Ctrl+PgUp"
+        onActivated: applyHistoryStep(-1)
     }
 
     DBusCall {
