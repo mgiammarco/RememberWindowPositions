@@ -1839,13 +1839,27 @@ Item {
             // windows whose captions are similar. The parsed version object is already
             // a valid windowData (its .saved carry alreadyMatched=true for id-matched
             // entries, which twoWayMatch skips); we just feed it the remaining windows
-            // as the loading list. minConfidence 0 = always place the best match.
+            // as the loading list.
+            //
+            // CRUCIAL difference from the login-restore path: there minConfidence is 0
+            // ("always place the best match") because a freshly-opened window has no
+            // position, so any guess beats the default cascade slot. On a version recall
+            // the windows are ALREADY placed sensibly, so forcing a weak match makes
+            // things worse - it shuffles same-app windows (e.g. dozens of Chrome/Firefox
+            // windows whose captions twoWayMatch cannot tell apart) into each other's
+            // spots. This is exactly what happens after a crash/relogin: internalIds are
+            // regenerated, Pass 1 matches almost nothing, and everything falls to Pass 2.
+            // So here we require a STRONG caption match and otherwise leave the window
+            // untouched ("do no harm"). 85 = the "partial caption match" rung; anything
+            // weaker (50, 0 = "pick anything") is rejected, so unidentifiable windows stay
+            // put instead of jumping to a random saved geometry.
+            const recallMinConfidence = 85;
             if (remaining.length > 0) {
                 windowData.loading = remaining;
                 let confidenceIndex = 0;
                 let results = [];
                 while (windowData.loading.length > 0 && confidenceIndex < config.confidence.length) {
-                    results.push(...twoWayMatch(windowData, config.confidence[confidenceIndex], 0));
+                    results.push(...twoWayMatch(windowData, config.confidence[confidenceIndex], recallMinConfidence));
                     confidenceIndex++;
                 }
                 results.sort((a, b) => a.saved.stackingOrder - b.saved.stackingOrder);
