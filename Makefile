@@ -1,6 +1,11 @@
 SCRIPT_NAME := rememberwindowpositions
 PKGFILE := $(SCRIPT_NAME).kwinscript
 SRC_DIR := src
+# Plasma 6 ships the binary as qdbus6; the bare `qdbus` wrapper fails here with
+# "could not find a Qt installation of ''". Pin it explicitly.
+QDBUS := qdbus6
+# Canonical location kpackagetool6 installs the script to.
+INSTALL_DIR := $(HOME)/.local/share/kwin/scripts/$(SCRIPT_NAME)
 SESSION_WIDTH := 1920
 SESSION_HEIGHT := 1080
 SESSION_OUTPUT_COUNT := 1
@@ -9,7 +14,7 @@ SESSION_APPLICATIONS := # dolphin konsole kate
 
 .NOTPARALLEL: all
 
-.PHONY: all build install uninstall clean enable disable restart-kwin logs load unload reload remove-keybindings
+.PHONY: all build install uninstall clean enable disable restart-kwin logs load unload reload reload-installed remove-keybindings
 
 all: install clean
 
@@ -35,12 +40,12 @@ clean:
 enable:
 	@echo "Enabling $(SCRIPT_NAME)..."
 	@kwriteconfig6 --file kwinrc --group Plugins --key $(SCRIPT_NAME)Enabled true
-	@qdbus org.kde.KWin /KWin reconfigure
+	@$(QDBUS) org.kde.KWin /KWin reconfigure
 
 disable:
 	@echo "Disabling $(SCRIPT_NAME)..."
 	@kwriteconfig6 --file kwinrc --group Plugins --key $(SCRIPT_NAME)Enabled false
-	@qdbus org.kde.KWin /KWin reconfigure
+	@$(QDBUS) org.kde.KWin /KWin reconfigure
 
 restart-kwin:
 	if [ "$$XDG_SESSION_TYPE" = "x11" ]; then \
@@ -66,6 +71,16 @@ unload:
 
 reload: unload load
 
+# Reload the INSTALLED script's code into the running session, no relogin needed.
+# `$(QDBUS) ... reconfigure` does NOT reload script code on Plasma 6 (and does not
+# unload on Enabled=false); only an explicit /Scripting unload+load does, which is
+# what bin/unload.sh + bin/load.sh perform. Global shortcuts registered at the
+# previous boot survive this reload. NOTE: a brand-new ShortcutHandler name still
+# needs a full relogin to register (see docs / project memory).
+reload-installed: install
+	bin/unload.sh "$(SCRIPT_NAME)" || true
+	bin/load.sh "$(INSTALL_DIR)" "$(SCRIPT_NAME)"
+
 remove-keybindings:
 	@echo "Removing all unused custom keybindings..."
-	qdbus org.kde.kglobalaccel /component/kwin org.kde.kglobalaccel.Component.cleanUp
+	$(QDBUS) org.kde.kglobalaccel /component/kwin org.kde.kglobalaccel.Component.cleanUp
