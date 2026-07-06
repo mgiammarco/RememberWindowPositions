@@ -199,6 +199,7 @@ Item {
             perfectMultiWindowRestoreList: stringListToNormalAndWildcard(KWin.readConfig("perfectMultiWindowRestoreList", browserList)),
             loginBoost: KWin.readConfig("loginBoost", true),
             loginBoostMultiplier: KWin.readConfig("loginBoostMultiplier", 2),
+            crashBoostMultiplier: KWin.readConfig("crashBoostMultiplier", 4),
             sessionRestore: KWin.readConfig("sessionRestore", false),
             sessionRestoreSize: KWin.readConfig("sessionRestoreSize", true),
             sessionRestoreVirtualDesktop: KWin.readConfig("sessionRestoreVirtualDesktop", true),
@@ -242,6 +243,13 @@ Item {
         config.rememberOnlyScreenName = config.multiMonitorType == 2;
         config.multiWindowRestoreAttempts = config.loginBoost ? config.loginBoostMultiplier * config.multiWindowRestoreAttemptsDefault : config.multiWindowRestoreAttemptsDefault;
         config.perfectMultiWindowRestoreAttempts = config.loginBoost ? config.loginBoostMultiplier * config.perfectMultiWindowRestoreAttemptsDefault : config.perfectMultiWindowRestoreAttemptsDefault;
+        // After a crash the whole session reopens at once: tabs lazy-load and
+        // captions arrive very late, so the normal ~10s budget expires while
+        // windows are still indistinguishable. Give them 4x the time.
+        if (crashedLastSession) {
+            config.multiWindowRestoreAttempts *= config.crashBoostMultiplier;
+            config.perfectMultiWindowRestoreAttempts *= config.crashBoostMultiplier;
+        }
         config.loginOverride = true;
         // log('Whitelist: ' + JSON.stringify(config.whitelist));
         logMode();
@@ -879,9 +887,31 @@ Item {
             let results = [];
             let confidenceIndex = 0;
 
+            // With several indistinguishable windows left, the sub-85 ladder
+            // rungs pair them near-randomly (observed post-crash: 37 Chrome
+            // windows placed on caption scores < 50). Stop the ladder at the
+            // strong rungs and fill the remaining slots deterministically
+            // instead. A single remaining window keeps the original full
+            // ladder - with one candidate the forced match is safe (this also
+            // preserves the single-window-app and last-window paths).
+            let useSlotFill = windowData.loading.length > 1;
+
             while (windowData.loading.length > 0 && confidenceIndex < config.confidence.length) {
+                if (useSlotFill && config.confidence[confidenceIndex].caption < 85) break;
                 results.push(...twoWayMatch(windowData, config.confidence[confidenceIndex], minConfidence));
                 confidenceIndex++;
+            }
+
+            if (useSlotFill && windowData.loading.length > 0) {
+                let slots = windowData.saved.filter((s) => !s.alreadyMatched);
+                let filled = slotFillAssign(slots, windowData.loading);
+                for (let f = 0; f < filled.length; f++) {
+                    filled[f].saved.alreadyMatched = true;
+                    windowData.loading.splice(windowData.loading.indexOf(filled[f].loading), 1);
+                    let score = config.ignoreNumbers ? matchCaptionIgnoreNumbers(filled[f].saved.caption, filled[f].loading.caption) : matchCaption(filled[f].saved.caption, filled[f].loading.caption);
+                    results.push({ loading: filled[f].loading, saved: filled[f].saved, captionScore: score });
+                }
+                if (filled.length > 0) logE('Final commit slot fill placed ' + filled.length + ' window(s) for ' + clientName);
             }
 
             results.sort((a, b) => a.saved.stackingOrder - b.saved.stackingOrder);

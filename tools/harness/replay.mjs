@@ -298,4 +298,37 @@ const C = (caption, x, y, extra = {}) => ({ resourceClass: 'app', caption, x, y,
   check('pass3: can be disabled', applyVersion(vw3, [C('ZZZZ', 10, 10)], { slotFill: false }).length === 0);
 }
 
+// --- login final commit (Task 7) ---
+function finalCommitLadder(windowData, minConfidence) {
+  // mirrors main.qml restoreWindowsBasedOnConfidence final-commit section
+  const results = [];
+  const useSlotFill = windowData.loading.length > 1;
+  let ci = 0;
+  while (windowData.loading.length > 0 && ci < CONFIDENCE.length) {
+    if (useSlotFill && CONFIDENCE[ci].caption < 85) break;
+    results.push(...twoWayMatch(windowData, CONFIDENCE[ci], minConfidence));
+    ci++;
+  }
+  if (useSlotFill && windowData.loading.length > 0) {
+    const slots = windowData.saved.filter((sv) => !sv.alreadyMatched);
+    for (const pair of slotFillAssign(slots, windowData.loading)) {
+      pair.saved.alreadyMatched = true;
+      windowData.loading.splice(windowData.loading.indexOf(pair.loading), 1);
+      results.push({ loading: pair.loading, saved: pair.saved, captionScore: matchCaptionIgnoreNumbers(pair.saved.caption, pair.loading.caption), slotFill: true });
+    }
+  }
+  return results;
+}
+{
+  // ambiguous multi-window: no sub-85 twoWayMatch pairing, slot fill instead
+  const wd = { saved: [S('AAAA', 0, 0, { so: 1 }), S('BBBB', 1000, 0, { so: 2 })], loading: [C('ZZZZ', 950, 10), C('QQQQ', 30, 20)] };
+  const res = finalCommitLadder(wd, 0);
+  check('final: ambiguous windows go through slot fill', res.length === 2 && res.every(r => r.slotFill === true));
+  check('final: slot fill is nearest-based', res.find(r => r.saved.caption === 'AAAA').loading.caption === 'QQQQ');
+  // single remaining window: original full-ladder force placement preserved
+  const wd2 = { saved: [S('AAAA', 0, 0)], loading: [C('ZZZZ', 500, 500)] };
+  const res2 = finalCommitLadder(wd2, 0);
+  check('final: single window keeps original floor-0 ladder', res2.length === 1 && !res2[0].slotFill);
+}
+
 summary();
