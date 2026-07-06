@@ -2522,6 +2522,7 @@ Item {
     }
 
     Component.onDestruction: {
+        settings.rememberwindowpositions_cleanShutdown = "1"; // write the clean flag first - nothing after this line may prevent it
         log('Closing...');
         updateSessionRestoreSaves();
         saveWindowsToSettings(true);
