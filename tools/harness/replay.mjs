@@ -149,6 +149,34 @@ export function slotFillAssign(savedSlots, clients) {
   return pairs;
 }
 
+// Trim version history to 5 entries, evicting unprotected entries first.
+// Protected = captured by a DIFFERENT script session (s missing = legacy,
+// treated as protected) and younger than 24h — the layouts crash recovery
+// needs. The freshest capture (index 0) is never evicted directly. When only
+// protected entries remain, the oldest protected beyond the 2 reserved slots
+// are evicted. Mirrors main.qml trimVersionHistory (Task 5).
+export function trimVersionHistory(history, scriptSessionId, now) {
+  const maxVersions = 5;
+  const reservedProtected = 2;
+  const protectedMs = 24 * 60 * 60 * 1000;
+  const isProtected = (v) => (v.s === undefined || v.s !== scriptSessionId) && (now - v.t < protectedMs);
+  while (history.length > maxVersions) {
+    let evict = -1;
+    for (let i = history.length - 1; i >= 1; i--) {   // oldest unprotected, never index 0
+      if (!isProtected(history[i])) { evict = i; break; }
+    }
+    if (evict === -1) {                                // all protected: oldest beyond reserve
+      let seen = 0;
+      for (let i = 0; i < history.length; i++) {
+        if (isProtected(history[i])) { seen++; if (seen > reservedProtected) evict = i; }
+      }
+    }
+    if (evict === -1) evict = history.length - 1;      // absolute fallback
+    history.splice(evict, 1);
+  }
+  return history;
+}
+
 // ---------------------------------------------------------------- tests ----
 let failures = 0;
 export function check(name, cond) {
@@ -208,6 +236,40 @@ const C = (caption, x, y, extra = {}) => ({ resourceClass: 'app', caption, x, y,
   const wins = [C('w-high', 100, 0, { so: 5 }), C('w-low', -100, 0, { so: 1 })];
   const pair = slotFillAssign(slot, wins);
   check('slotfill: distance tie broken by window stackingOrder', pair.length === 1 && pair[0].loading.caption === 'w-low');
+}
+
+// --- protected history eviction (Task 3) ---
+{
+  const H = 60 * 60 * 1000;
+  const now = 1000 * H;
+  const P = (ageH) => ({ t: now - ageH * H, d: 'pre-crash', s: 'session-A' });
+  const N = (ageMin) => ({ t: now - ageMin * 60000, d: 'post-crash', s: 'session-B' });
+  // 10 post-crash captures against 5 pre-crash versions: >=2 pre-crash survive
+  let hist = [P(1), P(2), P(3), P(4), P(5)];
+  for (let i = 10; i >= 1; i--) {
+    hist.unshift(N(i));
+    trimVersionHistory(hist, 'session-B', now);
+  }
+  check('evict: history capped at 5', hist.length === 5);
+  check('evict: >=2 protected pre-crash versions survive', hist.filter(v => v.s === 'session-A').length >= 2);
+  check('evict: freshest capture kept at head', hist[0].s === 'session-B' && hist[0].t === now - 60000);
+  // expired prior-session versions (>24h) lose protection
+  let hist2 = [P(30), P(40), P(50), P(60), P(70)];
+  for (let i = 5; i >= 1; i--) {
+    hist2.unshift(N(i));
+    trimVersionHistory(hist2, 'session-B', now);
+  }
+  check('evict: expired versions are not protected', hist2.filter(v => v.s === 'session-A').length === 0);
+  // single-session behavior unchanged: oldest evicted
+  let hist3 = [N(2), N(3), N(4), N(5), N(6)];
+  hist3.unshift(N(1));
+  trimVersionHistory(hist3, 'session-B', now);
+  check('evict: same-session trims oldest', hist3.length === 5 && hist3[4].t === now - 5 * 60000);
+  // legacy entries without s are protected while young
+  let hist4 = [{ t: now - 2 * H, d: 'legacy' }, N(3), N(4), N(5), N(6)];
+  hist4.unshift(N(1));
+  trimVersionHistory(hist4, 'session-B', now);
+  check('evict: legacy (no s) treated as protected', hist4.some(v => v.d === 'legacy'));
 }
 
 summary();
