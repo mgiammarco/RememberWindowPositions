@@ -2446,13 +2446,14 @@ Item {
     }
 
     Component.onCompleted: {
+        debugLogs = KWin.readConfig("debugLogs", false);
         // Crash detection: the flag is "1" only if the previous session reached
         // the clean-shutdown write. Read it, then immediately arm it for this
         // session. Absent/unreadable counts as a crash (safe direction).
+        // Placed after the debugLogs read so the diagnostic line below can actually print.
         crashedLastSession = settings.rememberwindowpositions_cleanShutdown !== "1";
         settings.rememberwindowpositions_cleanShutdown = "0";
         if (crashedLastSession) logE('Previous session did not shut down cleanly - crash recovery mode active');
-        debugLogs = KWin.readConfig("debugLogs", false);
         // Script is loaded - init config
         log('Loaded...');
         cacheWindowOrder();
