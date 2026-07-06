@@ -1775,6 +1775,38 @@ Item {
         }
     }
 
+    // Deterministic slot fill: assign remaining live windows to remaining saved
+    // slots of the SAME app. Slots are consumed in ascending stackingOrder; each
+    // takes the nearest remaining window (squared Euclidean distance between
+    // geometry centers), ties broken by ascending window stackingOrder. Surplus
+    // windows are left untouched. Generalizes the original app's intentional
+    // "last unmatched window is force-restored" behavior to N windows, replacing
+    // the sub-85 caption roulette that shuffled same-app windows after a crash.
+    // Mirrored in tools/harness/replay.mjs (slotFillAssign) - keep in sync.
+    function slotFillAssign(savedSlots, clients) {
+        let slots = savedSlots.slice().sort((a, b) => (a.stackingOrder || 0) - (b.stackingOrder || 0));
+        let remaining = clients.slice();
+        let pairs = [];
+        for (let s = 0; s < slots.length && remaining.length > 0; s++) {
+            let slot = slots[s];
+            let sx = slot.x + slot.width / 2;
+            let sy = slot.y + slot.height / 2;
+            let bestIdx = 0;
+            let bestDist = Infinity;
+            for (let i = 0; i < remaining.length; i++) {
+                let cx = remaining[i].x + remaining[i].width / 2;
+                let cy = remaining[i].y + remaining[i].height / 2;
+                let d = (cx - sx) * (cx - sx) + (cy - sy) * (cy - sy);
+                if (d < bestDist || (d === bestDist && (remaining[i].stackingOrder || 0) < (remaining[bestIdx].stackingOrder || 0))) {
+                    bestDist = d;
+                    bestIdx = i;
+                }
+            }
+            pairs.push({ saved: slot, loading: remaining.splice(bestIdx, 1)[0] });
+        }
+        return pairs;
+    }
+
     function applyVersion(blob) {
         let versionWindows;
         try {
@@ -1870,6 +1902,25 @@ Item {
                         logE('Could not apply version to window ' + app + ': ' + e);
                     }
                 }
+            }
+
+            // Pass 3: slot fill - the slots twoWayMatch could not confidently
+            // assign are filled with the remaining same-app windows, so an
+            // explicit recall always restores the layout SHAPE (user decision:
+            // hybrid). Confident matches from Pass 1/2 are never overridden.
+            if (windowData.loading.length > 0) {
+                let slots = windowData.saved.filter((s) => !s.alreadyMatched);
+                let filled = slotFillAssign(slots, windowData.loading);
+                for (let f = 0; f < filled.length; f++) {
+                    filled[f].saved.alreadyMatched = true;
+                    let score = config.ignoreNumbers ? matchCaptionIgnoreNumbers(filled[f].saved.caption, filled[f].loading.caption) : matchCaption(filled[f].saved.caption, filled[f].loading.caption);
+                    try {
+                        restoreWindowPlacement(filled[f].saved, filled[f].loading, score, getCurrentConfig(filled[f].loading));
+                    } catch (e) {
+                        logE('Could not apply version (slot fill) to window ' + app + ': ' + e);
+                    }
+                }
+                if (filled.length > 0) log('applyVersion slot fill placed ' + filled.length + ' window(s) for ' + app);
             }
         }
         return true;

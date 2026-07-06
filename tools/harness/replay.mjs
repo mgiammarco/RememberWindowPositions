@@ -119,6 +119,13 @@ export function applyVersion(versionWindows, clients, opts = {}) {
         ci++;
       }
     }
+    if ((opts.slotFill ?? true) && wd.loading && wd.loading.length > 0) {   // Pass 3: slot fill
+      const slots = wd.saved.filter((sv) => !sv.alreadyMatched);
+      for (const pair of slotFillAssign(slots, wd.loading)) {
+        pair.saved.alreadyMatched = true;
+        placements.push({ app, client: pair.loading, saved: pair.saved, captionScore: matchCaptionIgnoreNumbers(pair.saved.caption, pair.loading.caption), pass: 3 });
+      }
+    }
   }
   return placements;
 }
@@ -198,10 +205,12 @@ const C = (caption, x, y, extra = {}) => ({ resourceClass: 'app', caption, x, y,
   check('pass1: id match beats caption', placements.every(p => p.pass === 1) &&
     placements.find(p => p.client.caption === 'Doc B').saved.caption === 'Doc A');
 }
-// Regression: Pass 2 floor 85 leaves weak matches unplaced (bug #1 fix)
+// Regression: Pass 2 floor 85 leaves weak matches unplaced (bug #1 fix).
+// slotFill disabled: this isolates Pass 2's own floor from Pass 3 (Task 4),
+// which by design DOES fill these same slots (see pass3 tests below).
 {
   const vw = { app: { saved: [S('Sprint Planning | Fibery', 0, 0), S('Nuova scheda', 900, 900)] } };
-  const placements = applyVersion(vw, [C('Kindle - Google Chrome', 10, 10), C('Totally Different Title', 910, 910)]);
+  const placements = applyVersion(vw, [C('Kindle - Google Chrome', 10, 10), C('Totally Different Title', 910, 910)], { slotFill: false });
   check('pass2: sub-85 matches are not placed', placements.length === 0);
 }
 // Regression: Pass 2 places strong caption matches
@@ -270,6 +279,23 @@ const C = (caption, x, y, extra = {}) => ({ resourceClass: 'app', caption, x, y,
   hist4.unshift(N(1));
   trimVersionHistory(hist4, 'session-B', now);
   check('evict: legacy (no s) treated as protected', hist4.some(v => v.d === 'legacy'));
+}
+
+// --- recall Pass 3 (Task 4) ---
+{
+  // captions all garbage (sub-85): Pass 2 places nothing, Pass 3 fills every slot
+  const vw = { app: { saved: [S('AAAA', 0, 0, { so: 1 }), S('BBBB', 1000, 0, { so: 2 })] } };
+  const clients = [C('ZZZZ', 950, 10), C('QQQQ', 30, 20)];
+  const placements = applyVersion(vw, clients);
+  check('pass3: all slots filled', placements.length === 2 && placements.every(p => p.pass === 3));
+  check('pass3: nearest assignment', placements.find(p => p.saved.caption === 'AAAA').client.caption === 'QQQQ');
+  // no cross-app fill
+  const vw2 = { appX: { saved: [S('AAAA', 0, 0)] } };
+  const placements2 = applyVersion(vw2, [C('ZZZZ', 10, 10)]); // client is resourceClass 'app'
+  check('pass3: never crosses resourceClass', placements2.length === 0);
+  // opt-out for the login final-commit ladder tests
+  const vw3 = { app: { saved: [S('AAAA', 0, 0)] } };
+  check('pass3: can be disabled', applyVersion(vw3, [C('ZZZZ', 10, 10)], { slotFill: false }).length === 0);
 }
 
 summary();
