@@ -202,5 +202,12 @@ const C = (caption, x, y, extra = {}) => ({ resourceClass: 'app', caption, x, y,
   const oneWin = slotFillAssign([S('s1', 0, 0, { so: 2 }), S('s2', 900, 900, { so: 1 })], [C('w1', 890, 890)]);
   check('slotfill: slots consumed in stackingOrder', oneWin.length === 1 && oneWin[0].saved.caption === 's2');
 }
+{
+  // equal-distance tie broken by ascending window stackingOrder
+  const slot = [S('s1', 0, 0)];
+  const wins = [C('w-high', 100, 0, { so: 5 }), C('w-low', -100, 0, { so: 1 })];
+  const pair = slotFillAssign(slot, wins);
+  check('slotfill: distance tie broken by window stackingOrder', pair.length === 1 && pair[0].loading.caption === 'w-low');
+}
 
 summary();
