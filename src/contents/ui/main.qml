@@ -420,12 +420,14 @@ Item {
         }
     }
 
-    function restoreWindowPlacement(saveData, client, captionScore, windowConfig, restoreZ = true, moveVirtualDesktop = false, moveActivity = false) {
+    function restoreWindowPlacement(saveData, client, captionScore, windowConfig, restoreZ = true, moveVirtualDesktop = false, moveActivity = false, bypassMinimumCaptionMatch = false) {
         if (!client) return;
         if (client.deleted) return;
         if (!saveData) return;
         if (client.rwp_restoreBlocked) return;
-        if (captionScore < config.minimumCaptionMatch) return;
+        // Slot-fill placements bypass this gate - they are deliberate shape-restoring placements
+        // whose caption score is low by definition; all other guards (blocked, deleted, captionless) still apply to them.
+        if (captionScore < config.minimumCaptionMatch && !bypassMinimumCaptionMatch) return;
         if (!config.restoreWindowsWithoutCaption && (!client.caption || client.caption.trim().length == 0)) return;
 
         // Bind this saved entry to the live window's session-stable internalId. A later
@@ -894,6 +896,8 @@ Item {
             // instead. A single remaining window keeps the original full
             // ladder - with one candidate the forced match is safe (this also
             // preserves the single-window-app and last-window paths).
+            // Invariant: the top ladder rung has caption: 100 >= 85, so twoWayMatch's
+            // rwp_save fast path always drains instant-matched windows before the sub-85 break can trigger.
             let useSlotFill = windowData.loading.length > 1;
 
             while (windowData.loading.length > 0 && confidenceIndex < config.confidence.length) {
@@ -909,7 +913,7 @@ Item {
                     filled[f].saved.alreadyMatched = true;
                     windowData.loading.splice(windowData.loading.indexOf(filled[f].loading), 1);
                     let score = config.ignoreNumbers ? matchCaptionIgnoreNumbers(filled[f].saved.caption, filled[f].loading.caption) : matchCaption(filled[f].saved.caption, filled[f].loading.caption);
-                    results.push({ loading: filled[f].loading, saved: filled[f].saved, captionScore: score });
+                    results.push({ loading: filled[f].loading, saved: filled[f].saved, captionScore: score, slotFill: true });
                 }
                 if (filled.length > 0) logE('Final commit slot fill placed ' + filled.length + ' window(s) for ' + clientName);
             }
@@ -920,7 +924,7 @@ Item {
             let validRestoredWindow = null;
 
             for (let i = 0; i < results.length; i++) {
-                restoreWindowPlacement(results[i].saved, results[i].loading, results[i].captionScore, getCurrentConfig(results[i].loading));
+                restoreWindowPlacement(results[i].saved, results[i].loading, results[i].captionScore, getCurrentConfig(results[i].loading), true, false, false, results[i].slotFill === true);
                 if (!results[i].loading.minimized) {
                     validRestoredWindow = results[i].loading;
                 }
@@ -1955,7 +1959,7 @@ Item {
                     filled[f].saved.alreadyMatched = true;
                     let score = config.ignoreNumbers ? matchCaptionIgnoreNumbers(filled[f].saved.caption, filled[f].loading.caption) : matchCaption(filled[f].saved.caption, filled[f].loading.caption);
                     try {
-                        restoreWindowPlacement(filled[f].saved, filled[f].loading, score, getCurrentConfig(filled[f].loading));
+                        restoreWindowPlacement(filled[f].saved, filled[f].loading, score, getCurrentConfig(filled[f].loading), true, false, false, true);
                     } catch (e) {
                         logE('Could not apply version (slot fill) to window ' + app + ': ' + e);
                     }
