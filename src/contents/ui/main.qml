@@ -24,6 +24,11 @@ Item {
 
     property int restoreMode: 0
     property int historyIndex: 0
+    // Identifies THIS script run. Version-history entries carry it (field `s`);
+    // entries from a different run are protected from post-crash churn eviction.
+    // Regenerated on script reload - false "prior session" positives are benign
+    // (they only occupy the 2 reserved history slots for up to 24h).
+    property string scriptSessionId: 'S' + Date.now()
     // True while the user is stepping through version history with the shortcuts.
     // While set, the periodic snapshot must NOT overwrite the persisted layout or
     // capture versions - otherwise browsing to version N-1 lets the 60s snapshot
@@ -1957,6 +1962,37 @@ Item {
         return JSON.stringify(out);
     }
 
+    // Trim version history to 5 entries, evicting unprotected entries first.
+    // Protected = captured by a DIFFERENT script session (s missing = legacy,
+    // treated as protected) and younger than 24h - the layouts crash recovery
+    // needs. Without this, the 60s snapshot re-captures the broken post-crash
+    // layout and evicts every good pre-crash version within ~5 minutes. The
+    // freshest capture (index 0) is never evicted directly; when only protected
+    // entries remain, the oldest beyond the 2 reserved slots are evicted.
+    // Mirrored in tools/harness/replay.mjs (trimVersionHistory) - keep in sync.
+    function trimVersionHistory(history) {
+        const maxVersions = 5;
+        const reservedProtected = 2;
+        const protectedMs = 24 * 60 * 60 * 1000;
+        let now = Date.now();
+        let isProtected = (v) => (v.s === undefined || v.s !== scriptSessionId) && (now - v.t < protectedMs);
+        while (history.length > maxVersions) {
+            let evict = -1;
+            for (let i = history.length - 1; i >= 1; i--) {
+                if (!isProtected(history[i])) { evict = i; break; }
+            }
+            if (evict === -1) {
+                let seen = 0;
+                for (let i = 0; i < history.length; i++) {
+                    if (isProtected(history[i])) { seen++; if (seen > reservedProtected) evict = i; }
+                }
+            }
+            if (evict === -1) evict = history.length - 1;
+            history.splice(evict, 1);
+        }
+        return history;
+    }
+
     function captureVersion(blob) {
         if (blob === '{}') return; // don't record empty-state versions (e.g. after clearing all saves)
         let history;
@@ -1977,8 +2013,8 @@ Item {
         for (let i = 0; i < history.length; i++) {
             if (versionSignature(history[i].d) === sig) return;
         }
-        history.unshift({ t: Date.now(), d: blob });
-        if (history.length > 5) history.length = 5;
+        history.unshift({ t: Date.now(), d: blob, s: scriptSessionId });
+        trimVersionHistory(history);
         settings.rememberwindowpositions_windowsHistory = JSON.stringify(history);
         // Don't yank the user's browse position to "current" if a window happens to
         // close while they are stepping through history - that would shift every
