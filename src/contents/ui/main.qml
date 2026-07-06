@@ -29,6 +29,11 @@ Item {
     // Regenerated on script reload - false "prior session" positives are benign
     // (they only occupy the 2 reserved history slots for up to 24h).
     property string scriptSessionId: 'S' + Date.now()
+    // True when the previous script session did not reach the clean-shutdown
+    // write - i.e. KWin/system crashed. Read once at startup; drives the
+    // crash-recovery behaviors (longer caption-wait budget). A manual script
+    // reload also reads as a crash: accepted, the effects are never destructive.
+    property bool crashedLastSession: false
     // True while the user is stepping through version history with the shortcuts.
     // While set, the periodic snapshot must NOT overwrite the persisted layout or
     // capture versions - otherwise browsing to version N-1 lets the 60s snapshot
@@ -2198,6 +2203,7 @@ Item {
     }
 
     function saveWindowsToSettings(shutdown) {
+        if (shutdown) settings.rememberwindowpositions_cleanShutdown = "1";
         if (config.onlySaveOnShutdown && !shutdown) return;
         clearSessionRestoreSaves();
 
@@ -2417,6 +2423,7 @@ Item {
         property string rememberwindowpositions_windowsBackup: "{}"
         property string rememberwindowpositions_windowsHistory: "[]"
         property string rememberwindowpositions_configOverrides: "{}"
+        property string rememberwindowpositions_cleanShutdown: ""
         property int rememberwindowpositions_currentDefaultOverrideCount: 0
         // property bool rememberwindowpositions_autoShowMainMenu: true
     }
@@ -2439,6 +2446,12 @@ Item {
     }
 
     Component.onCompleted: {
+        // Crash detection: the flag is "1" only if the previous session reached
+        // the clean-shutdown write. Read it, then immediately arm it for this
+        // session. Absent/unreadable counts as a crash (safe direction).
+        crashedLastSession = settings.rememberwindowpositions_cleanShutdown !== "1";
+        settings.rememberwindowpositions_cleanShutdown = "0";
+        if (crashedLastSession) logE('Previous session did not shut down cleanly - crash recovery mode active');
         debugLogs = KWin.readConfig("debugLogs", false);
         // Script is loaded - init config
         log('Loaded...');
