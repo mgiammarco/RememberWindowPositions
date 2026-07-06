@@ -87,6 +87,24 @@ There are lots of other settings that let you control exactly how and when to re
 
 - Keeps a history of the last 5 saved window layouts; step back/forward through them with `Meta+Ctrl+PgDown` / `Meta+Ctrl+PgUp` to instantly reapply a previous layout to the open windows.
 
+### Crash recovery
+
+The script detects an unclean shutdown (crash) via a persisted flag. After a
+crash:
+
+- Versions captured before the crash are **protected** for 24 hours: at least
+  2 of the 5 history slots are reserved for them, so the periodic snapshot of
+  the (still messy) post-crash session cannot evict your last good layouts.
+- The login restore waits longer for window titles to settle
+  (`crashBoostMultiplier`, default 4x the normal budget).
+- Windows that still cannot be identified by title are placed by a
+  deterministic *slot fill* — every saved position is filled by the nearest
+  same-application window — instead of random weak title matches. The layout
+  shape is restored; for look-alike windows (e.g. many browser windows) the
+  exact window↔position pairing is best-effort.
+- The recall shortcuts apply the same three passes: exact window id, strong
+  title match (≥85), then slot fill.
+
 ### Future ideas
 
 The future features depend on you.
