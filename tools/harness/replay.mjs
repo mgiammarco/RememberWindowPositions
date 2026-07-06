@@ -123,6 +123,32 @@ export function applyVersion(versionWindows, clients, opts = {}) {
   return placements;
 }
 
+// Deterministic slot fill: assign remaining live windows to remaining saved
+// slots of the SAME app. Slots are consumed in ascending stackingOrder; each
+// takes the nearest remaining window (squared Euclidean distance between
+// geometry centers), ties broken by ascending window stackingOrder. Surplus
+// windows are left untouched. Mirrors main.qml slotFillAssign (Task 4).
+export function slotFillAssign(savedSlots, clients) {
+  const slots = savedSlots.slice().sort((a, b) => (a.stackingOrder || 0) - (b.stackingOrder || 0));
+  const remaining = clients.slice();
+  const pairs = [];
+  for (let s = 0; s < slots.length && remaining.length > 0; s++) {
+    const slot = slots[s];
+    const sx = slot.x + slot.width / 2, sy = slot.y + slot.height / 2;
+    let bestIdx = 0, bestDist = Infinity;
+    for (let i = 0; i < remaining.length; i++) {
+      const cx = remaining[i].x + remaining[i].width / 2, cy = remaining[i].y + remaining[i].height / 2;
+      const d = (cx - sx) * (cx - sx) + (cy - sy) * (cy - sy);
+      if (d < bestDist || (d === bestDist && (remaining[i].stackingOrder || 0) < (remaining[bestIdx].stackingOrder || 0))) {
+        bestDist = d;
+        bestIdx = i;
+      }
+    }
+    pairs.push({ saved: slot, loading: remaining.splice(bestIdx, 1)[0] });
+  }
+  return pairs;
+}
+
 // ---------------------------------------------------------------- tests ----
 let failures = 0;
 export function check(name, cond) {
@@ -156,4 +182,25 @@ const C = (caption, x, y, extra = {}) => ({ resourceClass: 'app', caption, x, y,
   const placements = applyVersion(vw, [C('(25) Calendar | Microsoft Teams', 500, 500)]);
   check('pass2: >=85 caption match is placed', placements.length === 1 && placements[0].pass === 2);
 }
+
+// --- slot fill (Task 2) ---
+{
+  // nearest-window assignment, deterministic
+  const slots = [S('s1', 0, 0, { so: 1 }), S('s2', 1000, 0, { so: 2 }), S('s3', 0, 1000, { so: 3 })];
+  const wins = [C('w-near-s3', 20, 980), C('w-near-s1', 10, 10), C('w-near-s2', 990, 20)];
+  const pairs = slotFillAssign(slots, wins);
+  check('slotfill: fills all slots', pairs.length === 3);
+  check('slotfill: nearest wins', pairs[0].loading.caption === 'w-near-s1' &&
+    pairs[1].loading.caption === 'w-near-s2' && pairs[2].loading.caption === 'w-near-s3');
+  const pairs2 = slotFillAssign(slots, wins);
+  check('slotfill: deterministic', JSON.stringify(pairs.map(p => p.loading.caption)) === JSON.stringify(pairs2.map(p => p.loading.caption)));
+}
+{
+  // surplus windows stay unassigned; surplus slots stay unfilled
+  const oneSlot = slotFillAssign([S('s1', 0, 0)], [C('w1', 0, 0), C('w2', 5, 5)]);
+  check('slotfill: surplus windows untouched', oneSlot.length === 1);
+  const oneWin = slotFillAssign([S('s1', 0, 0, { so: 2 }), S('s2', 900, 900, { so: 1 })], [C('w1', 890, 890)]);
+  check('slotfill: slots consumed in stackingOrder', oneWin.length === 1 && oneWin[0].saved.caption === 's2');
+}
+
 summary();
