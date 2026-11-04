@@ -200,6 +200,9 @@ Item {
             loginBoost: KWin.readConfig("loginBoost", true),
             loginBoostMultiplier: KWin.readConfig("loginBoostMultiplier", 2),
             crashBoostMultiplier: KWin.readConfig("crashBoostMultiplier", 4),
+            // Max pause between two closes of the same app's quit sequence. Chrome
+            // closing ~40 windows takes >10 s with pauses up to ~4 s between windows.
+            closingBurstGapMs: KWin.readConfig("closingBurstGapMs", 10000),
             sessionRestore: KWin.readConfig("sessionRestore", false),
             sessionRestoreSize: KWin.readConfig("sessionRestoreSize", true),
             sessionRestoreVirtualDesktop: KWin.readConfig("sessionRestoreVirtualDesktop", true),
@@ -1383,7 +1386,8 @@ Item {
             }
 
             log('Closing - time since last: ' + (lastValidClosingTime - saving.closeTime));
-            if (lastValidClosingTime - saving.closeTime <= 1200) {
+            // Mirrored in tools/harness/replay.mjs (selectClosingBurst) - keep in sync.
+            if (lastValidClosingTime - saving.closeTime <= config.closingBurstGapMs) {
                 // Valid save
                 windowData.windowCountLastSession++;
                 windowData.saved.push(saving);
@@ -1878,6 +1882,14 @@ Item {
         for (let app in liveByApp) {
             let windowData = versionWindows[app];
             let liveClients = liveByApp[app];
+
+            // A recall is the user's explicit layout choice: an open/login restore still
+            // waiting on captions for this app must not fire afterwards and move windows again.
+            restoreTimer.removeTimeoutsFor(app);
+            if (config.windows[app]) {
+                clearSavesExceptRememberAlways(app);
+                clearLoadingExceptRememberAlways(app);
+            }
 
             // Pass 1: exact match on the session-stable internalId. Unambiguous even
             // when several windows of the same app share overlapping captions, so it

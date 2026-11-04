@@ -184,6 +184,22 @@ export function trimVersionHistory(history, scriptSessionId, now) {
   return history;
 }
 
+// Pick the windows that belong to the app's final close burst. Walks the closed
+// list from the most recent close backwards and keeps each window closed within
+// maxGapMs of the previously kept one. Mirrors main.qml saveWindowDataWhenLastWindowClosed.
+export const CLOSING_BURST_GAP_MS = 10000;
+export function selectClosingBurst(closed, maxGapMs, now) {
+  const kept = [];
+  let lastValid = now;
+  for (let i = closed.length - 1; i >= 0; i--) {
+    if (lastValid - closed[i].closeTime <= maxGapMs) {
+      kept.push(closed[i]);
+      lastValid = closed[i].closeTime;
+    }
+  }
+  return kept;
+}
+
 // ---------------------------------------------------------------- tests ----
 let failures = 0;
 export function check(name, cond) {
@@ -329,6 +345,29 @@ function finalCommitLadder(windowData, minConfidence) {
   const wd2 = { saved: [S('AAAA', 0, 0)], loading: [C('ZZZZ', 500, 500)] };
   const res2 = finalCommitLadder(wd2, 0);
   check('final: single window keeps original floor-0 ladder', res2.length === 1 && !res2[0].slotFill);
+}
+
+// --- closing burst: real Chrome quit 2026-11-04 09:47:24-37 (41 windows in 13 s) ---
+{
+  // consecutive gaps (ms) walking back from the last close, as logged by main.qml
+  const tailGaps = [0, 583, 24, 29, 27, 5, 29, 50, 54, 281, 23, 276, 92, 49, 138, 180, 775, 104, 30, 26, 31, 19, 13, 113, 118];
+  // offsets (ms) before the 26th-newest close for the earlier part of the same quit
+  const headOffsets = [1596, 4663, 4677, 5065, 5083, 5363, 5393, 5437, 9179, 9648, 9679, 9690, 9716, 9744, 9771];
+  const now = 1_000_000_000;
+  const newestFirst = [{ closeTime: now, id: 'quit-0' }];
+  let t = now;
+  tailGaps.forEach((g, i) => { t -= g; newestFirst.push({ closeTime: t, id: 'quit-' + (i + 1) }); });
+  const t25 = t;
+  headOffsets.forEach((o, i) => newestFirst.push({ closeTime: t25 - o, id: 'quit-' + (26 + i) }));
+  newestFirst.push({ closeTime: t25 - 139751, id: 'manual-close-2min-before' });
+  newestFirst.push({ closeTime: t25 - 41923073, id: 'stale-yesterday' });
+  const closed = newestFirst.slice().reverse(); // closed[] is chronological, oldest first
+
+  const kept = selectClosingBurst(closed, CLOSING_BURST_GAP_MS, now);
+  const quitCount = 1 + tailGaps.length + headOffsets.length;
+  check('burst: whole 13 s Chrome quit is saved (' + kept.length + '/' + quitCount + ')', kept.length === quitCount);
+  check('burst: window closed by hand 2 min before the quit is not saved', !kept.some(k => k.id === 'manual-close-2min-before'));
+  check('burst: stale close from yesterday is not saved', !kept.some(k => k.id === 'stale-yesterday'));
 }
 
 summary();
